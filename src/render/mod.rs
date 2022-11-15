@@ -17,6 +17,11 @@ mod lines;
 #[derive(Copy, Clone, Component, PartialEq, Debug)]
 pub struct ColliderDebugColor(pub Color);
 
+/// Marker to draw debug lines for colliders if `global` in [`DebugRenderContext`]
+/// is set to false.
+#[derive(Copy, Clone, Component, PartialEq, Debug)]
+pub struct ColliderDebug;
+
 /// Plugin rensponsible for rendering (using lines) what Rapier "sees" when performing
 /// its physics simulation. This is typically useful to check proper
 /// alignment between colliders and your own visual assets.
@@ -25,6 +30,9 @@ pub struct RapierDebugRenderPlugin {
     /// meaning that the debug-render lines will always appear on top
     /// of (won’t be occluded by) your own visual assets.
     pub always_on_top: bool,
+    /// Is the debug-rendering will be enabled for every entity? Or just for
+    /// collider entities with [`ColliderDebug`] component.
+    pub global: bool,
     /// Is the debug-rendering enabled?
     pub enabled: bool,
     /// Control some aspects of the render coloring.
@@ -52,6 +60,7 @@ impl Default for RapierDebugRenderPlugin {
     fn default() -> Self {
         Self {
             enabled: false,
+            global: true,
             always_on_top: false,
             style: DebugRenderStyle::default(),
             mode: DebugRenderMode::default(),
@@ -77,6 +86,9 @@ impl RapierDebugRenderPlugin {
 pub struct DebugRenderContext {
     /// Is the debug-rendering currently enabled?
     pub enabled: bool,
+    /// Is the debug-rendering enabled for every entity? Otherwise it will only work
+    /// for collider entities with [`ColliderDebug`] component.
+    pub global: bool,
     /// Pipeline responsible for rendering. Access `pipeline.mode` and `pipeline.style`
     /// to modify the set of rendered elements, and modify the default coloring rules.
     pub pipeline: DebugRenderPipeline,
@@ -88,6 +100,7 @@ impl Default for DebugRenderContext {
     fn default() -> Self {
         Self {
             enabled: true,
+            global: true,
             pipeline: DebugRenderPipeline::default(),
             always_on_top: true,
         }
@@ -99,6 +112,7 @@ impl Plugin for RapierDebugRenderPlugin {
         app.add_plugin(lines::DebugLinesPlugin::always_on_top(self.always_on_top))
             .insert_resource(DebugRenderContext {
                 enabled: true,
+                global: self.global,
                 pipeline: DebugRenderPipeline::new(self.style, self.mode),
                 always_on_top: self.always_on_top,
             })
@@ -110,8 +124,10 @@ impl Plugin for RapierDebugRenderPlugin {
 }
 
 struct BevyLinesRenderBackend<'world, 'state, 'a, 'b, 'c> {
+    global: bool,
     physics_scale: f32,
     custom_colors: Query<'world, 'state, &'a ColliderDebugColor>,
+    visible: Query<'world, 'state, &'a ColliderDebug>,
     context: &'b RapierContext,
     lines: &'c mut DebugLines,
 }
@@ -130,6 +146,21 @@ impl<'world, 'state, 'a, 'b, 'c> BevyLinesRenderBackend<'world, 'state, 'a, 'b, 
 
         color.map(|co| co.as_hsla_f32()).unwrap_or(default)
     }
+
+    fn drawing_enabled(&self, object: DebugRenderObject) -> bool {
+        match object {
+            DebugRenderObject::Collider(h, ..) => self
+                .context
+                .colliders
+                .get(h)
+                .map(|co| {
+                    let entity = Entity::from_bits(co.user_data as u64);
+                    self.global || self.visible.contains(entity)
+                })
+                .unwrap_or(false),
+            _ => true,
+        }
+    }
 }
 
 impl<'world, 'state, 'a, 'b, 'c> DebugRenderBackend
@@ -143,6 +174,10 @@ impl<'world, 'state, 'a, 'b, 'c> DebugRenderBackend
         b: Point<Real>,
         color: [f32; 4],
     ) {
+        if !self.drawing_enabled(object) {
+            return;
+        }
+
         let scale = self.physics_scale;
         let color = self.object_color(object, color);
         self.lines.line_colored(
@@ -161,6 +196,10 @@ impl<'world, 'state, 'a, 'b, 'c> DebugRenderBackend
         b: Point<Real>,
         color: [f32; 4],
     ) {
+        if !self.drawing_enabled(object) {
+            return;
+        }
+
         let scale = self.physics_scale;
         let color = self.object_color(object, color);
         self.lines.line_colored(
@@ -172,12 +211,13 @@ impl<'world, 'state, 'a, 'b, 'c> DebugRenderBackend
     }
 }
 
-fn debug_render_scene(
+fn debug_render_scene<'a>(
     rapier_context: Res<RapierContext>,
     mut render_context: ResMut<DebugRenderContext>,
     lines_config: ResMut<DebugLinesConfig>,
     mut lines: ResMut<DebugLines>,
-    custom_colors: Query<&ColliderDebugColor>,
+    custom_colors: Query<&'a ColliderDebugColor>,
+    visible: Query<&'a ColliderDebug>,
 ) {
     if !render_context.enabled {
         return;
@@ -185,8 +225,10 @@ fn debug_render_scene(
 
     *lines_config.always_on_top.write().unwrap() = render_context.always_on_top;
     let mut backend = BevyLinesRenderBackend {
+        global: render_context.global,
         physics_scale: rapier_context.physics_scale,
         custom_colors,
+        visible,
         context: &rapier_context,
         lines: &mut lines,
     };

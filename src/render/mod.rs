@@ -111,7 +111,7 @@ impl Plugin for RapierDebugRenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugin(lines::DebugLinesPlugin::always_on_top(self.always_on_top))
             .insert_resource(DebugRenderContext {
-                enabled: true,
+                enabled: self.enabled,
                 global: self.global,
                 pipeline: DebugRenderPipeline::new(self.style, self.mode),
                 always_on_top: self.always_on_top,

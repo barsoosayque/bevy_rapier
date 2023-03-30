@@ -1,11 +1,11 @@
-use crate::geometry::{Collider, Toi};
+use crate::geometry::{Collider, CollisionGroups, Toi};
 use crate::math::{Real, Rot, Vect};
 use bevy::prelude::*;
 
 use crate::plugin::RapierContext;
 pub use rapier::control::CharacterAutostep;
 pub use rapier::control::CharacterLength;
-use rapier::prelude::{ColliderSet, InteractionGroups, QueryFilterFlags};
+use rapier::prelude::{ColliderSet, QueryFilterFlags};
 
 /// A collision between the character and its environment during its movement.
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -76,7 +76,7 @@ pub struct MoveShapeOptions {
     /// Should the character apply forces to dynamic bodies in its path?
     pub apply_impulse_to_dynamic_bodies: bool,
     /// Should the character be automatically snapped to the ground if the distance between
-    /// the ground and its feed are smaller than the specified threshold?
+    /// the ground and its feet are smaller than the specified threshold?
     pub snap_to_ground: Option<CharacterLength>,
 }
 
@@ -130,14 +130,14 @@ pub struct KinematicCharacterController {
     /// Should the character apply forces to dynamic bodies in its path?
     pub apply_impulse_to_dynamic_bodies: bool,
     /// Should the character be automatically snapped to the ground if the distance between
-    /// the ground and its feed are smaller than the specified threshold?
+    /// the ground and its feet are smaller than the specified threshold?
     pub snap_to_ground: Option<CharacterLength>,
     /// Flags for filtering-out some categories of entities from the environment seen by the
     /// character controller.
     pub filter_flags: QueryFilterFlags,
     /// Groups for filtering-out some colliders from the environment seen by the character
     /// controller.
-    pub filter_groups: Option<InteractionGroups>,
+    pub filter_groups: Option<CollisionGroups>,
 }
 
 impl KinematicCharacterController {

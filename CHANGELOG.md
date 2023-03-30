@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.21.0  (07 March 2023)
+### Modified
+- Update to Bevy 0.10.
+- The `PhysicsHooksWithQuery` trait has been renamed to by the `BevyPhysicsHooks`.
+- Bevy resources and queries accessed by the physics hook are now specified by the implementor of `BevyPhysicsHooks`
+  which must derive Bevy’s `SystemParam` trait. This implies that the physics hook’s `filter_contact_pair` (and
+  all its other methods) no longer take the Bevy `Query` as argument. Queries and resources are accessed through
+  `self`.
+- Rename `PhysicsStages` to `PhysicsSet`.
+
+## 0.20.0 (15 Jan. 2023)
+### Added
+- Add the `RigidBodyDisabled` and `ColliderDisabled` component that can be inserted to disable a rigid-body
+  or collider without removing it from the scene.
+
+### Fix
+- Fix spawn position of colliders without rigid bodies.
+- Fix overriding enabled flag in debug render.
+
+### Modified
+- Make debug-rendering enabled by default when inserting the `RapierDebugRenderPlugin` plugin with its default configuration.
+- The `debug-render` feature has been replaced by two features: `debug-render-2d` and `debug-render-3d`. For example, 
+  using `debug-render-2d` with `bevy_rapier3d`, the debug-render will work with 2D cameras (useful, e.g., for top-down games
+  with 3D graphics).
+- In order to facilitate the use of `bevy_rapier` in headless mode, the `AsyncCollider` and `AsyncSceneCollider`
+  components were moved behind the `async-collider` feature (enabled by default). Disabling that feature will
+  make `bevy_rapier` work even with the `MinimalPlugins` inserted instead of the `DefaultPlugins`.
+- Corrected an API inconsistency where `bevy_rapier` components would sometimes require an `InteracitonGroup` type defined in
+  `rapier`. It has been replaced by the `CollisionGroup` type (defined in `bevy_rapier`).
+- `Velocity::zero,linear,angular` are now const-fn.
+
 ## 0.19.0 (18 Nov. 2022)
 ### Modified
 - Update to Bevy 0.9

@@ -1,5 +1,5 @@
-use crate::plugin::RapierContext;
 use crate::render::lines::DebugLinesConfig;
+use crate::{plugin::RapierContext, render::lines::DrawLinesLabel};
 use bevy::prelude::*;
 use lines::DebugLines;
 use rapier::math::{Point, Real};
@@ -47,7 +47,7 @@ impl Default for RapierDebugRenderPlugin {
     #[cfg(feature = "dim2")]
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             always_on_top: true,
             style: DebugRenderStyle {
                 rigid_body_axes_length: 20.0,
@@ -59,7 +59,7 @@ impl Default for RapierDebugRenderPlugin {
     #[cfg(feature = "dim3")]
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             global: true,
             always_on_top: false,
             style: DebugRenderStyle::default(),
@@ -117,23 +117,24 @@ impl Plugin for RapierDebugRenderPlugin {
                 pipeline: DebugRenderPipeline::new(self.style, self.mode),
                 always_on_top: self.always_on_top,
             })
-            .add_system_to_stage(
-                CoreStage::PostUpdate,
-                debug_render_scene.before("draw_lines"),
+            .add_system(
+                debug_render_scene
+                    .in_base_set(CoreSet::PostUpdate)
+                    .before(DrawLinesLabel),
             );
     }
 }
 
-struct BevyLinesRenderBackend<'world, 'state, 'a, 'b, 'c> {
+struct BevyLinesRenderBackend<'world, 'state, 'a, 'b, 'c, 'd> {
     global: bool,
     physics_scale: f32,
     custom_colors: Query<'world, 'state, &'a ColliderDebugColor>,
-    visible: Query<'world, 'state, &'a ColliderDebug>,
-    context: &'b RapierContext,
-    lines: &'c mut DebugLines,
+    visible: Query<'world, 'state, &'b ColliderDebug>,
+    context: &'c RapierContext,
+    lines: &'d mut DebugLines,
 }
 
-impl<'world, 'state, 'a, 'b, 'c> BevyLinesRenderBackend<'world, 'state, 'a, 'b, 'c> {
+impl<'world, 'state> BevyLinesRenderBackend<'world, 'state, '_, '_, '_, '_> {
     fn object_color(&self, object: DebugRenderObject, default: [f32; 4]) -> [f32; 4] {
         let color = match object {
             DebugRenderObject::Collider(h, ..) => self.context.colliders.get(h).and_then(|co| {
@@ -149,6 +150,10 @@ impl<'world, 'state, 'a, 'b, 'c> BevyLinesRenderBackend<'world, 'state, 'a, 'b, 
     }
 
     fn drawing_enabled(&self, object: DebugRenderObject) -> bool {
+        if self.global {
+            return true;
+        }
+
         match object {
             DebugRenderObject::Collider(h, ..) => self
                 .context
@@ -156,7 +161,7 @@ impl<'world, 'state, 'a, 'b, 'c> BevyLinesRenderBackend<'world, 'state, 'a, 'b, 
                 .get(h)
                 .map(|co| {
                     let entity = Entity::from_bits(co.user_data as u64);
-                    self.global || self.visible.contains(entity)
+                    self.visible.contains(entity)
                 })
                 .unwrap_or(false),
             _ => true,
@@ -164,9 +169,7 @@ impl<'world, 'state, 'a, 'b, 'c> BevyLinesRenderBackend<'world, 'state, 'a, 'b, 
     }
 }
 
-impl<'world, 'state, 'a, 'b, 'c> DebugRenderBackend
-    for BevyLinesRenderBackend<'world, 'state, 'a, 'b, 'c>
-{
+impl<'world, 'state> DebugRenderBackend for BevyLinesRenderBackend<'world, 'state, '_, '_, '_, '_> {
     #[cfg(feature = "dim2")]
     fn draw_line(
         &mut self,
@@ -212,13 +215,13 @@ impl<'world, 'state, 'a, 'b, 'c> DebugRenderBackend
     }
 }
 
-fn debug_render_scene<'a>(
+fn debug_render_scene(
     rapier_context: Res<RapierContext>,
     mut render_context: ResMut<DebugRenderContext>,
     lines_config: ResMut<DebugLinesConfig>,
     mut lines: ResMut<DebugLines>,
-    custom_colors: Query<&'a ColliderDebugColor>,
-    visible: Query<&'a ColliderDebug>,
+    custom_colors: Query<&ColliderDebugColor>,
+    visible: Query<&ColliderDebug>,
 ) {
     if !render_context.enabled {
         return;

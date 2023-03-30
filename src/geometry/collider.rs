@@ -1,11 +1,11 @@
 use std::fmt;
 
-#[cfg(feature = "dim3")]
-use crate::geometry::VHACDParameters;
+#[cfg(all(feature = "dim3", feature = "async-collider"))]
+use {crate::geometry::VHACDParameters, bevy::utils::HashMap};
+
 use bevy::prelude::*;
 use bevy::reflect::FromReflect;
-#[cfg(feature = "dim3")]
-use bevy::utils::HashMap;
+
 use bevy::utils::HashSet;
 use rapier::geometry::Shape;
 use rapier::prelude::{ColliderHandle, InteractionGroups, SharedShape};
@@ -18,31 +18,14 @@ use crate::math::Vect;
 pub struct RapierColliderHandle(pub ColliderHandle);
 
 /// A component which will be replaced by the specified collider type after the referenced mesh become available.
-#[cfg(feature = "dim3")]
-#[derive(Component, Debug, Clone)]
-pub struct AsyncCollider {
-    /// Mesh handle to use for collider generation.
-    pub handle: Handle<Mesh>,
-    /// Collider type that will be generated.
-    pub shape: ComputedColliderShape,
-}
-
-#[cfg(feature = "dim3")]
-impl Default for AsyncCollider {
-    fn default() -> Self {
-        Self {
-            handle: Default::default(),
-            shape: ComputedColliderShape::TriMesh,
-        }
-    }
-}
+#[cfg(all(feature = "dim3", feature = "async-collider"))]
+#[derive(Component, Debug, Clone, Default)]
+pub struct AsyncCollider(pub ComputedColliderShape);
 
 /// A component which will be replaced the specified collider types on children with meshes after the referenced scene become available.
-#[cfg(feature = "dim3")]
+#[cfg(all(feature = "dim3", feature = "async-collider"))]
 #[derive(Component, Debug, Clone)]
 pub struct AsyncSceneCollider {
-    /// Scene handle to use for colliders generation.
-    pub handle: Handle<Scene>,
     /// Collider type for each scene mesh not included in [`named_shapes`]. If [`None`], then all
     /// shapes will be skipped for processing except [`named_shapes`].
     pub shape: Option<ComputedColliderShape>,
@@ -51,11 +34,22 @@ pub struct AsyncSceneCollider {
     pub named_shapes: HashMap<String, Option<ComputedColliderShape>>,
 }
 
+#[cfg(all(feature = "dim3", feature = "async-collider"))]
+impl Default for AsyncSceneCollider {
+    fn default() -> Self {
+        Self {
+            shape: Some(ComputedColliderShape::TriMesh),
+            named_shapes: Default::default(),
+        }
+    }
+}
+
 /// Shape type based on a Bevy mesh asset.
-#[cfg(feature = "dim3")]
-#[derive(Debug, Clone)]
+#[cfg(all(feature = "dim3", feature = "async-collider"))]
+#[derive(Debug, Clone, Default)]
 pub enum ComputedColliderShape {
     /// Triangle-mesh.
+    #[default]
     TriMesh,
     /// Convex decomposition.
     ConvexDecomposition(VHACDParameters),
@@ -64,6 +58,7 @@ pub enum ComputedColliderShape {
 /// A geometric entity that can be attached to a body so it can be affected by contacts
 /// and intersection queries.
 #[derive(Component, Clone)] // TODO: Reflect
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct Collider {
     /// The raw shape from Rapier.
     pub raw: SharedShape,
@@ -497,5 +492,26 @@ impl CollidingEntities {
     /// An iterator visiting all colliding entities in arbitrary order.
     pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
         self.0.iter().copied()
+    }
+}
+
+/// Indicates whether or not the collider is disabled explicitly by the user.
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Component, Reflect, FromReflect)]
+#[reflect(Component, PartialEq)]
+pub struct ColliderDisabled;
+
+/// We restrict the scaling increment to 1.0e-4, to avoid numerical jitter
+/// due to the extraction of scaling factor from the GlobalTransform matrix.
+pub fn get_snapped_scale(scale: Vect) -> Vect {
+    fn snap_value(new: f32) -> f32 {
+        const PRECISION: f32 = 1.0e4;
+        (new * PRECISION).round() / PRECISION
+    }
+
+    Vect {
+        x: snap_value(scale.x),
+        y: snap_value(scale.y),
+        #[cfg(feature = "dim3")]
+        z: snap_value(scale.z),
     }
 }

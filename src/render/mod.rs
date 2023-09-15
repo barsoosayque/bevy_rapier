@@ -133,10 +133,8 @@ impl<'world, 'state> BevyLinesRenderBackend<'world, 'state, '_, '_, '_> {
     }
 
     fn drawing_enabled(&self, object: DebugRenderObject) -> bool {
-        let Some(ref visible_colliders) = self.visible_colliders else { return true; };
-
-        match object {
-            DebugRenderObject::Collider(h, ..) => {
+        match (object, &self.visible_colliders) {
+            (DebugRenderObject::Collider(h, ..), Some(visible_colliders)) => {
                 let collider = self.context.colliders.get(h);
                 collider
                     .map(|co| {

@@ -16,7 +16,7 @@ use crate::plugin::configuration::{SimulationToRenderTime, TimestepMode};
 use crate::plugin::{RapierConfiguration, RapierContext};
 use crate::prelude::{
     BevyPhysicsHooks, BevyPhysicsHooksAdapter, CollidingEntities, KinematicCharacterController,
-    KinematicCharacterControllerOutput, RigidBodyDisabled,
+    KinematicCharacterControllerOutput, MassModifiedEvent, RigidBodyDisabled,
 };
 use crate::utils;
 use bevy::ecs::system::{StaticSystemParam, SystemParamItem};
@@ -119,12 +119,17 @@ pub fn apply_scale(
 
 /// System responsible for applying changes the user made to a collider-related component.
 pub fn apply_collider_user_changes(
-    config: Res<RapierConfiguration>,
     mut context: ResMut<RapierContext>,
-    changed_collider_transforms: Query<
-        (&RapierColliderHandle, &GlobalTransform),
-        (Without<RapierRigidBodyHandle>, Changed<GlobalTransform>),
-    >,
+    config: Res<RapierConfiguration>,
+    (changed_collider_transforms, parent_query, transform_query): (
+        Query<
+            (Entity, &RapierColliderHandle, &GlobalTransform),
+            (Without<RapierRigidBodyHandle>, Changed<GlobalTransform>),
+        >,
+        Query<&Parent>,
+        Query<&Transform>,
+    ),
+
     changed_shapes: Query<(&RapierColliderHandle, &Collider), Changed<Collider>>,
     changed_active_events: Query<(&RapierColliderHandle, &ActiveEvents), Changed<ActiveEvents>>,
     changed_active_hooks: Query<(&RapierColliderHandle, &ActiveHooks), Changed<ActiveHooks>>,
@@ -149,17 +154,24 @@ pub fn apply_collider_user_changes(
         (&RapierColliderHandle, &ColliderMassProperties),
         Changed<ColliderMassProperties>,
     >,
+
+    mut mass_modified: EventWriter<MassModifiedEvent>,
 ) {
     let scale = context.physics_scale;
 
-    for (handle, transform) in changed_collider_transforms.iter() {
-        if let Some(co) = context.colliders.get_mut(handle.0) {
-            if co.parent().is_none() {
-                co.set_position(utils::transform_to_iso(
-                    &transform.compute_transform(),
-                    scale,
-                ))
+    for (entity, handle, transform) in changed_collider_transforms.iter() {
+        if context.collider_parent(entity).is_some() {
+            let (_, collider_position) =
+                collider_offset(entity, &context, &parent_query, &transform_query);
+
+            if let Some(co) = context.colliders.get_mut(handle.0) {
+                co.set_position_wrt_parent(utils::transform_to_iso(&collider_position, scale));
             }
+        } else if let Some(co) = context.colliders.get_mut(handle.0) {
+            co.set_position(utils::transform_to_iso(
+                &transform.compute_transform(),
+                scale,
+            ))
         }
     }
 
@@ -167,7 +179,13 @@ pub fn apply_collider_user_changes(
         if let Some(co) = context.colliders.get_mut(handle.0) {
             let mut scaled_shape = shape.clone();
             scaled_shape.set_scale(shape.scale / scale, config.scaled_shape_subdivision);
-            co.set_shape(scaled_shape.raw.clone())
+            co.set_shape(scaled_shape.raw.clone());
+
+            if let Some(body) = co.parent() {
+                if let Some(body_entity) = context.rigid_body_entity(body) {
+                    mass_modified.send(body_entity.into());
+                }
+            }
         }
     }
 
@@ -242,6 +260,12 @@ pub fn apply_collider_user_changes(
                     co.set_mass_properties(mprops.into_rapier(scale))
                 }
             }
+
+            if let Some(body) = co.parent() {
+                if let Some(body_entity) = context.rigid_body_entity(body) {
+                    mass_modified.send(body_entity.into());
+                }
+            }
         }
     }
 }
@@ -261,7 +285,7 @@ pub fn apply_rigid_body_user_changes(
     >,
     changed_velocities: Query<(&RapierRigidBodyHandle, &Velocity), Changed<Velocity>>,
     changed_additional_mass_props: Query<
-        (&RapierRigidBodyHandle, &AdditionalMassProperties),
+        (Entity, &RapierRigidBodyHandle, &AdditionalMassProperties),
         Changed<AdditionalMassProperties>,
     >,
     changed_locked_axes: Query<(&RapierRigidBodyHandle, &LockedAxes), Changed<LockedAxes>>,
@@ -279,6 +303,8 @@ pub fn apply_rigid_body_user_changes(
         (&RapierRigidBodyHandle, &RigidBodyDisabled),
         Changed<RigidBodyDisabled>,
     >,
+
+    mut mass_modified: EventWriter<MassModifiedEvent>,
 ) {
     let context = &mut *context;
     let scale = context.physics_scale;
@@ -315,7 +341,7 @@ pub fn apply_rigid_body_user_changes(
     // This is needed for detecting if the user actually changed the rigid-body
     // transform, or if it was just the change we made in our `writeback_rigid_bodies`
     // system.
-    let transform_changed =
+    let transform_changed_fn =
         |handle: &RigidBodyHandle,
          transform: &GlobalTransform,
          last_transform_set: &HashMap<RigidBodyHandle, GlobalTransform>| {
@@ -329,21 +355,38 @@ pub fn apply_rigid_body_user_changes(
         };
 
     for (handle, global_transform, mut interpolation) in changed_transforms.iter_mut() {
+        // Use an Option<bool> to avoid running the check twice.
+        let mut transform_changed = None;
+
         if let Some(interpolation) = interpolation.as_deref_mut() {
-            // Reset the interpolation so we don’t overwrite
-            // the user’s input.
-            interpolation.start = None;
-            interpolation.end = None;
+            transform_changed = transform_changed.or_else(|| {
+                Some(transform_changed_fn(
+                    &handle.0,
+                    global_transform,
+                    &context.last_body_transform_set,
+                ))
+            });
+
+            if transform_changed == Some(true) {
+                // Reset the interpolation so we don’t overwrite
+                // the user’s input.
+                interpolation.start = None;
+                interpolation.end = None;
+            }
         }
 
         if let Some(rb) = context.bodies.get_mut(handle.0) {
+            transform_changed = transform_changed.or_else(|| {
+                Some(transform_changed_fn(
+                    &handle.0,
+                    global_transform,
+                    &context.last_body_transform_set,
+                ))
+            });
+
             match rb.body_type() {
                 RigidBodyType::KinematicPositionBased => {
-                    if transform_changed(
-                        &handle.0,
-                        global_transform,
-                        &context.last_body_transform_set,
-                    ) {
+                    if transform_changed == Some(true) {
                         rb.set_next_kinematic_position(utils::transform_to_iso(
                             &global_transform.compute_transform(),
                             scale,
@@ -354,11 +397,7 @@ pub fn apply_rigid_body_user_changes(
                     }
                 }
                 _ => {
-                    if transform_changed(
-                        &handle.0,
-                        global_transform,
-                        &context.last_body_transform_set,
-                    ) {
+                    if transform_changed == Some(true) {
                         rb.set_position(
                             utils::transform_to_iso(&global_transform.compute_transform(), scale),
                             true,
@@ -380,7 +419,7 @@ pub fn apply_rigid_body_user_changes(
         }
     }
 
-    for (handle, mprops) in changed_additional_mass_props.iter() {
+    for (entity, handle, mprops) in changed_additional_mass_props.iter() {
         if let Some(rb) = context.bodies.get_mut(handle.0) {
             match mprops {
                 AdditionalMassProperties::MassProperties(mprops) => {
@@ -390,6 +429,8 @@ pub fn apply_rigid_body_user_changes(
                     rb.set_additional_mass(*mass, true);
                 }
             }
+
+            mass_modified.send(entity.into());
         }
     }
 
@@ -489,7 +530,10 @@ pub fn writeback_rigid_bodies(
     config: Res<RapierConfiguration>,
     sim_to_render_time: Res<SimulationToRenderTime>,
     global_transforms: Query<&GlobalTransform>,
-    mut writeback: Query<RigidBodyWritebackComponents>,
+    mut writeback: Query<
+        RigidBodyWritebackComponents,
+        (With<RigidBody>, Without<RigidBodyDisabled>),
+    >,
 ) {
     let context = &mut *context;
     let scale = context.physics_scale;
@@ -626,6 +670,38 @@ pub fn writeback_rigid_bodies(
     }
 }
 
+/// System responsible for writing updated mass properties back into the [`ReadMassProperties`] component.
+pub fn writeback_mass_properties(
+    mut context: ResMut<RapierContext>,
+    config: Res<RapierConfiguration>,
+
+    mut mass_props: Query<&mut ReadMassProperties>,
+    mut mass_modified: EventReader<MassModifiedEvent>,
+) {
+    let context = &mut *context;
+    let scale = context.physics_scale;
+
+    if config.physics_pipeline_active {
+        for entity in mass_modified.iter() {
+            if let Some(handle) = context.entity2body.get(entity).copied() {
+                if let Some(rb) = context.bodies.get(handle) {
+                    if let Ok(mut mass_props) = mass_props.get_mut(**entity) {
+                        let new_mass_props =
+                            MassProperties::from_rapier(rb.mass_properties().local_mprops, scale);
+
+                        // NOTE: we write the new value only if there was an
+                        //       actual change, in order to not trigger bevy’s
+                        //       change tracking when the values didn’t change.
+                        if mass_props.get() != &new_mass_props {
+                            mass_props.set(new_mass_props);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// System responsible for advancing the physics simulation, and updating the internal state
 /// for scene queries.
 pub fn step_simulation<Hooks>(
@@ -663,16 +739,6 @@ pub fn step_simulation<Hooks>(
         context.update_query_pipeline();
     }
 }
-
-/// NOTE: This currently does nothing in 2D.
-#[cfg(feature = "async-collider")]
-#[cfg(feature = "dim2")]
-pub fn init_async_colliders() {}
-
-/// NOTE: This does nothing in 3D with headless.
-#[cfg(feature = "headless")]
-#[cfg(feature = "dim3")]
-pub fn init_async_colliders() {}
 
 /// System responsible for creating `Collider` components from `AsyncCollider` components if the
 /// corresponding mesh has become available.
@@ -736,6 +802,42 @@ pub fn init_async_scene_colliders(
     }
 }
 
+fn collider_offset(
+    entity: Entity,
+    context: &RapierContext,
+    parent_query: &Query<&Parent>,
+    transform_query: &Query<&Transform>,
+) -> (Option<RigidBodyHandle>, Transform) {
+    let mut body_entity = entity;
+    let mut body_handle = context.entity2body.get(&body_entity).copied();
+    let mut child_transform = Transform::default();
+    while body_handle.is_none() {
+        if let Ok(parent_entity) = parent_query.get(body_entity) {
+            if let Ok(transform) = transform_query.get(body_entity) {
+                child_transform = *transform * child_transform;
+            }
+            body_entity = parent_entity.get();
+        } else {
+            break;
+        }
+
+        body_handle = context.entity2body.get(&body_entity).copied();
+    }
+
+    if body_handle.is_some() {
+        if let Ok(transform) = transform_query.get(body_entity) {
+            let scale_transform = Transform {
+                scale: transform.scale,
+                ..default()
+            };
+
+            child_transform = scale_transform * child_transform;
+        }
+    }
+
+    (body_handle, child_transform)
+}
+
 /// System responsible for creating new Rapier colliders from the related `bevy_rapier` components.
 pub fn init_colliders(
     mut commands: Commands,
@@ -743,7 +845,8 @@ pub fn init_colliders(
     mut context: ResMut<RapierContext>,
     colliders: Query<(ColliderComponents, Option<&GlobalTransform>), Without<RapierColliderHandle>>,
     mut rigid_body_mprops: Query<&mut ReadMassProperties>,
-    parent_query: Query<(&Parent, Option<&Transform>)>,
+    parent_query: Query<&Parent>,
+    transform_query: Query<&Transform>,
 ) {
     let context = &mut *context;
     let physics_scale = context.physics_scale;
@@ -820,21 +923,9 @@ pub fn init_colliders(
             builder = builder.contact_force_event_threshold(threshold.0);
         }
 
-        let mut body_entity = entity;
-        let mut body_handle = context.entity2body.get(&body_entity).copied();
-        let mut child_transform = Transform::default();
-        while body_handle.is_none() {
-            if let Ok((parent_entity, transform)) = parent_query.get(body_entity) {
-                if let Some(transform) = transform {
-                    child_transform = *transform * child_transform;
-                }
-                body_entity = parent_entity.get();
-            } else {
-                break;
-            }
-
-            body_handle = context.entity2body.get(&body_entity).copied();
-        }
+        let body_entity = entity;
+        let (body_handle, child_transform) =
+            collider_offset(entity, context, &parent_query, &transform_query);
 
         builder = builder.user_data(entity.to_bits() as u128);
 
@@ -848,10 +939,10 @@ pub fn init_colliders(
                 // Inserting the collider changed the rigid-body’s mass properties.
                 // Read them back from the engine.
                 if let Some(parent_body) = context.bodies.get(body_handle) {
-                    mprops.0 = MassProperties::from_rapier(
+                    mprops.set(MassProperties::from_rapier(
                         parent_body.mass_properties().local_mprops,
                         physics_scale,
-                    );
+                    ));
                 }
             }
             handle
@@ -1089,6 +1180,8 @@ pub fn sync_removals(
     mut removed_sensors: RemovedComponents<Sensor>,
     mut removed_rigid_body_disabled: RemovedComponents<RigidBodyDisabled>,
     mut removed_colliders_disabled: RemovedComponents<ColliderDisabled>,
+
+    mut mass_modified: EventWriter<MassModifiedEvent>,
 ) {
     /*
      * Rigid-bodies removal detection.
@@ -1128,6 +1221,10 @@ pub fn sync_removals(
      * Collider removal detection.
      */
     for entity in removed_colliders.iter() {
+        if let Some(parent) = context.collider_parent(entity) {
+            mass_modified.send(parent.into());
+        }
+
         if let Some(handle) = context.entity2collider.remove(&entity) {
             context
                 .colliders
@@ -1137,6 +1234,10 @@ pub fn sync_removals(
     }
 
     for entity in orphan_colliders.iter() {
+        if let Some(parent) = context.collider_parent(entity) {
+            mass_modified.send(parent.into());
+        }
+
         if let Some(handle) = context.entity2collider.remove(&entity) {
             context
                 .colliders
@@ -1207,7 +1308,6 @@ pub fn sync_removals(
         }
     }
 
-    // TODO: update mass props after collider removal.
     // TODO: what about removing forces?
 }
 
@@ -1421,7 +1521,7 @@ mod tests {
     fn colliding_entities_updates() {
         let mut app = App::new();
         app.add_event::<CollisionEvent>()
-            .add_system(update_colliding_entities);
+            .add_systems(Update, update_colliding_entities);
 
         let entity1 = app.world.spawn(CollidingEntities::default()).id();
         let entity2 = app.world.spawn(CollidingEntities::default()).id();
@@ -1507,8 +1607,8 @@ mod tests {
     #[cfg(all(feature = "dim3", feature = "async-collider"))]
     fn async_collider_initializes() {
         let mut app = App::new();
-        app.add_plugin(HeadlessRenderPlugin)
-            .add_system(init_async_colliders);
+        app.add_plugins(HeadlessRenderPlugin)
+            .add_systems(Update, init_async_colliders);
 
         let mut meshes = app.world.resource_mut::<Assets<Mesh>>();
         let cube = meshes.add(Cube::default().into());
@@ -1534,8 +1634,10 @@ mod tests {
         use bevy::scene::scene_spawner_system;
 
         let mut app = App::new();
-        app.add_plugin(HeadlessRenderPlugin)
-            .add_system(init_async_scene_colliders.after(scene_spawner_system));
+        app.add_plugins(HeadlessRenderPlugin).add_systems(
+            Update,
+            init_async_scene_colliders.after(scene_spawner_system),
+        );
 
         let mut meshes = app.world.resource_mut::<Assets<Mesh>>();
         let cube_handle = meshes.add(Cube::default().into());
@@ -1579,10 +1681,12 @@ mod tests {
     #[test]
     fn transform_propagation() {
         let mut app = App::new();
-        app.add_plugin(HeadlessRenderPlugin)
-            .add_plugin(TransformPlugin)
-            .add_plugin(TimePlugin)
-            .add_plugin(RapierPhysicsPlugin::<NoUserData>::default());
+        app.add_plugins((
+            HeadlessRenderPlugin,
+            TransformPlugin,
+            TimePlugin,
+            RapierPhysicsPlugin::<NoUserData>::default(),
+        ));
 
         let zero = (Transform::default(), Transform::default());
 
@@ -1634,10 +1738,12 @@ mod tests {
     #[test]
     fn transform_propagation2() {
         let mut app = App::new();
-        app.add_plugin(HeadlessRenderPlugin)
-            .add_plugin(TransformPlugin)
-            .add_plugin(TimePlugin)
-            .add_plugin(RapierPhysicsPlugin::<NoUserData>::default());
+        app.add_plugins((
+            HeadlessRenderPlugin,
+            TransformPlugin,
+            TimePlugin,
+            RapierPhysicsPlugin::<NoUserData>::default(),
+        ));
 
         let zero = (Transform::default(), Transform::default());
 
@@ -1714,16 +1820,18 @@ mod tests {
 
     impl Plugin for HeadlessRenderPlugin {
         fn build(&self, app: &mut App) {
-            app.add_plugin(WindowPlugin::default())
-                .add_plugin(AssetPlugin::default())
-                .add_plugin(ScenePlugin::default())
-                .add_plugin(RenderPlugin {
+            app.add_plugins((
+                WindowPlugin::default(),
+                AssetPlugin::default(),
+                ScenePlugin::default(),
+                RenderPlugin {
                     wgpu_settings: WgpuSettings {
                         backends: None,
                         ..Default::default()
                     },
-                })
-                .add_plugin(ImagePlugin::default());
+                },
+                ImagePlugin::default(),
+            ));
         }
     }
 }
